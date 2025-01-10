@@ -16,13 +16,13 @@ def main():
 
     result = Result()
 
-    logging.info("Ładowanie danych o usługach...")
+    logging.info("Loading data about services...")
     yml_processor = ProcessYML()
     if not yml_processor.data:
         logging.error("YAML processing failed. Exiting.")
         return
 
-    logging.info("Ładowanie danych z API Infracost...")
+    logging.info("Loading data API Infracost...")
     github_token = os.getenv('GITHUB_TOKEN')
     infracost_api_key = os.getenv('INFRACOST_API_KEY')
     if not github_token:
@@ -37,7 +37,7 @@ def main():
     import asyncio
     asyncio.get_event_loop().run_until_complete(asyncio.sleep(1))
 
-    logging.info("Budowanie DataFrames w Pandas...")
+    logging.info("Buliding DataFrames in Pandas...")
     pandas_formatter = PandasDataFormatter(infracost_fetch, yml_processor.data)
     if pandas_formatter.data.empty:
         logging.error("No data available after formatting. Exiting.")
