@@ -1,104 +1,119 @@
-from github import Github
-import requests
+import os
+import logging
+from github import Github, GithubException
+import re
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class Infracost_Fetch:
-  gcp_data = []
-  aws_data = []
-  azure_data = []
+class InfracostFetch:
+    def __init__(self, token):
+        self.github = Github(token)
+        self.aws_data = self.fetch_provider_data("aws")
+        self.azure_data = self.fetch_provider_data("azure")
+        self.gcp_data = self.fetch_provider_data("gcp")
+    
+    def get_services(self, repo_name, path, branch='master'):
+        try:
+            logger.info(f"Accessing repository: {repo_name}")
+            repo = self.github.get_repo(repo_name)
+            logger.info(f"Fetching contents from path: {path} on branch: {branch}")
+            contents = repo.get_contents(path, ref=branch)
+            services = [
+                content_file.path for content_file in contents 
+                if content_file.type == 'file' 
+                and not content_file.path.endswith('_test.go') 
+                and not content_file.path.endswith('util.go') 
+                and not content_file.path.endswith('util_test.go')
+            ]
+            logger.info(f"Fetched services: {services}")
+            return services
+        except GithubException as e:
+            logger.error(f"Error fetching {path} from {repo_name}: {e.status} {e.data.get('message')}")
+            return None
 
-  def __init__(self, secrets):
-    aws_services = self.get_services("infracost/infracost",
-                                     "internal/resources", "aws", secrets[0])
-    self.aws_data = self.fetch_infracost(aws_services, "aws", secrets[1])
-    azure_services = self.get_services("infracost/infracost",
-                                       "internal/resources", "azure",
-                                       secrets[0])
-    self.azure_data = self.fetch_infracost(azure_services, "azure", secrets[1])
-    gcp_services = self.get_services("infracost/infracost",
-                                     "internal/resources", "google",
-                                     secrets[0])
-    self.gcp_data = self.fetch_infracost(gcp_services, "gcp", secrets[1])
+    def fetch_provider_data(self, provider):
+        repo_name = "infracost/infracost"
+        branch = 'master'
+        if provider == 'gcp':
+            path = "internal/resources/google"
+        else:
+            path = f"internal/resources/{provider}"
+        
+        services = self.get_services(repo_name, path, branch)
+        if not services:
+            logger.warning(f"No services found for provider: {provider}")
+            return []
+        
+        provider_data = []
+        for service in services:
+            logger.info(f"Processing service: {service}")
+            try:
+                file_content = self.github.get_repo(repo_name).get_contents(service, ref=branch).decoded_content.decode()
+                cost_components = parse_service_file(file_content, service)
+                if not cost_components:
+                    logger.warning(f"No data returned for service: {service}")
+                    continue
+                provider_data.append(cost_components)
+            except GithubException as e:
+                logger.error(f"Error fetching file {service}: {e.status} {e.data.get('message')}")
+        return provider_data
 
-  def get_services(self, repository, path, provider, github_key):
-    g = Github(github_key)
-    repo = g.get_repo(repository)
-    value = repo.get_contents(path + "/" + provider)
-    while len(value) > 0:
-      file_content = value.pop(0)
-      if file_content.type == 'dir':
-        value.extend(repo.get_contents(file_content.path))
-      else:
-        table = ""
-        for single_file in value:
-          raw_file_content = single_file.decoded_content.decode('utf-8')
-          is_service_found = False
-          for item in raw_file_content.split("\n"):
-            if "Service:" in item and is_service_found:
-              table += "|"
-              is_service_found = False
-            if "Service:" in item:
-              item = item.strip().replace("Service:    ", "")
-              table += item
-              is_service_found = True
-            if "ProductFamily:" in item:
-              item = item.replace(" ", "")
-              table += item + "|"
-              is_service_found = False
-        table = table.replace("strPtr", "")
-        table = table.replace("ProductFamily", "")
-        table = table.replace("(", "")
-        table = table.replace(")", "")
-        table = table.replace('"', '')
-        table = table.replace(",|", "|")
-        table = table.replace(":", "")
-        table = table.strip()
-        formatted_data = []
-        rows = table.split("|")
-        for row in rows:
-          row_formatted = row.split(",")
-          if len(row_formatted) > 0:
-            a = row_formatted[0].strip()
-          else:
-            a = None
-          if len(row_formatted) > 1:
-            b = row_formatted[1].strip()
-          else:
-            b = None
-          if a != "" and b != "" and a != None and b != None:
-            formatted_data.append(a)
-        formatted_data = list(dict.fromkeys(formatted_data))
-        return formatted_data
-
-  def get_infracost(self, body, api_key):
-    response = requests.post('https://pricing.api.infracost.io/graphql',
-                             headers={
-                               'X-Api-Key': api_key,
-                               'Content-Type': 'application/json'
-                             },
-                             json={"query": body})
-    return response.json()['data']['products']
-
-  def fetch_infracost(self, srvs, provider, api_key):
-    body_template = """
-      {
-        products(
-          filter: {
-            vendorName: "VENDOR"
-            service: "SERVICE"
-          }
-        ) {
-          productFamily
-          service
-          prices(
-            filter: {}
-          ){ USD }
-        }
-      }
+def parse_service_file(file_content, service_path):
     """
-    body_template = body_template.replace("VENDOR", provider)
-    data = []
-    for service in srvs:
-      body = body_template.replace("SERVICE", service)
-      data += self.get_infracost(body, api_key)
-    return data
+    Parses the Go service file to extract the service name and assigns a dummy unit_cost.
+    Enhances regex to handle multi-line patterns and varying whitespaces.
+    """
+    cost_components = {}
+    
+    pattern = r'func\s*\(\w+\s*\*\w+\)\s*CoreType\s*\(\)\s*string\s*\{\s*return\s+"([^"]+)"\s*\}'
+    
+    service_match = re.search(pattern, file_content, re.MULTILINE | re.DOTALL)
+    if service_match:
+        service_name = service_match.group(1)
+        cost_components["service"] = service_name
+        cost_components["unit_cost"] = 1.0
+        logger.info(f"Extracted service name: {service_name} from {service_path}")
+    else:
+        logger.warning(f"Service name not found in the file: {service_path}")
+        snippet = file_content[:200].replace('\n', ' ')
+        logger.debug(f"File snippet for {service_path}: {snippet}")
+        return {}
+    
+    return cost_components
+
+
+def calculate_costs(cost_components, usage_metrics):
+    """
+    Calculates the total cost based on unit_cost and usage_metrics.
+    """
+    total_cost = 0.0
+    for component in cost_components:
+        service = component.get('service', 'Unknown')
+        unit_cost = component.get('unit_cost', 0)
+        usage = usage_metrics.get(service, 0)
+        component_cost = unit_cost * usage
+        total_cost += component_cost
+        logger.info(f"{service}: {usage} * {unit_cost} = {component_cost}")
+    logger.info(f"Total Cost: {total_cost}")
+    return total_cost
+
+def main():
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        logger.error("GitHub token not found in environment variables.")
+        return
+
+    infracost_fetch = InfracostFetch(token)
+    
+    usage_metrics = {
+    }
+
+    for provider, data in [('aws', infracost_fetch.aws_data),
+                           ('azure', infracost_fetch.azure_data),
+                           ('gcp', infracost_fetch.gcp_data)]:
+        for cost_component in data:
+            calculate_costs([cost_component], usage_metrics)
+
+if __name__ == "__main__":
+    main()

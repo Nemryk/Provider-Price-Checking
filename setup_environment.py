@@ -1,6 +1,4 @@
 import warnings
 
-
-def setupEnvironment():
-  warnings.filterwarnings('ignore')
-
+def setup_environment():
+    warnings.filterwarnings('ignore')
