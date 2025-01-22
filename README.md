@@ -5,4 +5,4 @@ Simple app to check price for theoretical cloud products using AI algorithms.
 - [@Nemryk 26915](https://github.com/Nemryk)
 - [@kvpsky 26851](https://github.com/kvpsky)
 - [@pawlock 26899](https://github.com/pawlock)
-- [@renta 26876](https://github.com/renta)
+- [@renta 26876](https://github.com/rentha)
